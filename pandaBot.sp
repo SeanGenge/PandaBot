@@ -20,7 +20,7 @@
 #define PLUGIN_CONTACT  "http://steamcommunity.com/id/flamingkirby/"
 
 // Different distances to the CLIENT
-#define ORBIT_DIST 300.0
+#define ORBIT_DIST 450.0
 #define CLOSE_DIST 700.0
 #define NORM_DIST 1000.0
 #define FAR_DIST 1500.0
@@ -31,7 +31,7 @@
 #define DEG_TO_RAD (PI / 180.0)
 
 //The max speed of the pyro
-#define PYRO_SPEED 400.0
+#define PYRO_SPEED 450.0
 
 // The maximum number of rockets that can be handled
 #define MAX_ROCKETS 100
@@ -60,11 +60,23 @@ enum OrbitDirection
 bool botEnabled;
 bool mapChanged;
 
+// Voting for bot
+int numVoters = 0;
+int numVotes = 0;
+int numVotesNeeded = 0;
+bool voted[MAXPLAYERS + 1] = {false, ...};
+bool canVote;
+float votePercentage = 0.5;
+
+int whichScore;
+
 // The next time the client can airblast
 float nextAirblastTime[MAXPLAYERS + 1];
 
 // The direction each client is orbiting
 OrbitDirection clientOrbitDir[MAXPLAYERS + 1];
+// The clients position before orbiting
+float clientOrbitPos[MAXPLAYERS + 1][3];
 // The rockets that will be orbited
 int orbitRocketRefs[MAXPLAYERS + 1][MAX_ROCKETS];
 // The bot will only be focusing on airblasting one rocket at a time
@@ -73,10 +85,6 @@ int priorityAirblastRefs[MAXPLAYERS + 1];
 float lookAtVector[MAXPLAYERS + 1][3];
 // The turn rate at which to look at the lookAtVector
 float lookSpeed[MAXPLAYERS + 1];
-// The flick direction
-float flickVector[MAXPLAYERS + 1][3];
-// Whether the bot is flicking
-bool isFlicking[MAXPLAYERS + 1];
 
 // The rocket entity reference
 int rocketEntityRef[MAX_ROCKETS];
@@ -90,6 +98,8 @@ int rocketClassIndex[MAX_ROCKETS];
 int numRocketDeflections[MAX_ROCKETS];
 // Determines whether a rocket is a spawn
 bool isSpawnRocket[MAX_ROCKETS];
+// Determines whether a rocket is a redirect
+bool isRedirect[MAX_ROCKETS];
 // The current speed of the rocket
 float rocketSpeed[MAX_ROCKETS];
 // The current turn rate of the rocket
@@ -99,8 +109,7 @@ int predictedTargets[MAX_ROCKETS];
 
 // The up direction. Value is initialized in init bots
 float up[3];
-float ang;
-float add;
+
 /*
 * Important rocket parameters
 * Default indices:
@@ -128,7 +137,7 @@ public Plugin:myinfo =
 {
 	name = PLUGIN_NAME,
 	author = PLUGIN_AUTHOR,
-	description = "A bot that can handle multiple rockets in dodgeball",
+	description = "A bot that can handle 1-2 rockets in dodgeball",
 	version = PLUGIN_VERSION,
 	url = PLUGIN_CONTACT
 }
@@ -143,10 +152,10 @@ public OnPluginStart()
 	
 	HookEvent("arena_round_start", OnRoundStart, EventHookMode_PostNoCopy);
 	HookEvent("arena_win_panel", OnRoundEnd, EventHookMode_PostNoCopy);
+	HookEvent("player_death", OnPlayerDeath, EventHookMode_Post);
 	
 	RegAdminCmd("sm_pbot", bot_Cmd, ADMFLAG_RCON, "Force enable/disable PvB.");
-	RegAdminCmd("sm_up", up_cmd, ADMFLAG_RCON, "Force enable/disable PvB.");
-	RegAdminCmd("sm_down", down_cmd, ADMFLAG_RCON, "Force enable/disable PvB.");
+	//RegConsoleCmd("sm_votepvb", votePvB_Cmd, "Vote to enable/disable PvB");
 }
 
 public OnConfigsExecuted()
@@ -154,13 +163,36 @@ public OnConfigsExecuted()
 	parseDodgeballConfiguration();
 }
 
+public OnClientConnected(client)
+{
+	if (IsFakeClient(client)) return;
+	
+	
+}
+
+public OnClientDisconnect(client)
+{
+	if (IsFakeClient(client)) return;
+	
+	
+}
+
+/*public Action:votePvB_Cmd(client, args)
+{
+	if (!GetConVarBool(cvarEnable) || GetConVarInt(cvarVoteMode) == 0) return Plugin_Handled;
+	
+	if (GetConVarInt(cvarVoteMode) != 2) AttemptPvBVotes(client);
+	else
+	{
+		PvBVoteMenu();
+	}
+	return Plugin_Handled;
+}*/
+
 public void OnMapStart()
 {
-	botEnabled = false;
-	
-	EnableBot();
-	
 	CreateTimer(5.0, timer_mapStart);
+	EnableBot();
 }
 
 public void OnMapEnd()
@@ -168,12 +200,31 @@ public void OnMapEnd()
 	mapChanged = true;
 }
 
+public void OnPlayerDeath(Event event, const char[] name, bool dontBroadcast) 
+{
+	int victim = GetClientOfUserId(GetEventInt(event, "userid"));
+	
+	if (isValidClient(victim))
+	{
+		int inflictor = GetEventInt(event, "inflictor_entindex");
+		int rocketIndex = findRocketByEntity(inflictor);
+		
+		if (rocketIndex != -1)
+		{
+			isRedirect[rocketIndex] = true;
+		}
+	}
+	
+	SetRandomSeed(_:GetGameTime());
+}
+
 public void OnRoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 	SetRandomSeed(GetTime());
-	ang = 0.0;
-	add = 5.0;
 	initBots();
+	
+	whichScore = GetRandomInt(0, 1);
+	//PrintToChatAll("%i", whichScore);
 }
 
 public void OnRoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -188,12 +239,14 @@ public Action timer_mapStart(Handle timer)
 
 public OnGameFrame()
 {
+	ChangePlayerTeam();
+	
 	int index = -1;
 	
 	// Manages all the rockets
 	while ((index = findNextValidRocket(index)) != -1)
 	{
-		if (isSpawnRocket[index] == true)
+		if (isSpawnRocket[index] == true || isRedirect[index] == true)
 		{
 			// Constantly checks the predicted target if the rocket is a spawn
 			// This is because when the rocket spawns, the team is 0 (not sure why) and so this is a small fix
@@ -205,6 +258,7 @@ public OnGameFrame()
 		{
 			numRocketDeflections[index]++;
 			isSpawnRocket[index] = false;
+			isRedirect[index] = false;
 			rocketSpeed[index] += rocketClassSpeedIncrement[rocketClassIndex[index]];
 			rocketTurnRate[index] += rocketClassTurnRateIncrement[rocketClassIndex[index]];
 			
@@ -213,7 +267,7 @@ public OnGameFrame()
 	}
 	
 	// Disable the bot
-	if (mapChanged) DisableBot();
+	//if (mapChanged && botEnabled) DisableBot();
 }
 
 public void OnEntitySpawned(int entity)
@@ -264,25 +318,13 @@ public Action:bot_Cmd(client, args)
 	return Plugin_Handled;
 }
 
-public Action:up_cmd(client, args)
-{
-	add += 1.0;
-	PrintToChatAll("%.2f", add);
-	return Plugin_Handled;
-}
-
-public Action:down_cmd(client, args)
-{
-	add -= 1.0;
-	PrintToChatAll("%.2f", add);
-	return Plugin_Handled;
-}
-
 EnableBot()
 {
+	ServerCommand("tf_bot_quota 0");
 	ServerCommand("mp_autoteambalance 0");
 	ServerCommand("tf_bot_add 1 Pyro blue easy \"%s\"", "Panda Bot");
-	ServerCommand("tf_bot_add 1 Pyro red easy \"%s\"", "Second Bot");
+	//ServerCommand("tf_bot_add 1 Pyro red easy \"%s\"", "Second Bot");
+	//ServerCommand("tf_bot_add 1 Pyro blue easy \"%s\"", "Third Bot");
 	ServerCommand("tf_bot_keep_class_after_death 1");
 	ServerCommand("tf_bot_taunt_victim_chance 0");
 	ServerCommand("tf_bot_join_after_player 0");
@@ -294,6 +336,7 @@ EnableBot()
 DisableBot()
 {
 	ServerCommand("tf_bot_kick all");
+	ServerCommand("tf_bot_quota 0");
 	
 	PrintToChatAll("\x01[\x03%s\x01]\x04 PvB Disabled.", PLUGIN_NAME);
 	botEnabled = false;
@@ -312,32 +355,16 @@ void initBots()
 	
 	for (int c = 0; c < MAXPLAYERS + 1; c++)
 	{
+		if (!isValidClient(c))
+			continue;
 		
+		clientOrbitDir[c] = noOrbit;
+		
+		float clientPos[3];
+		GetClientAbsOrigin(c, clientPos);
+		
+		setClientOrbitPos(c, clientPos);
 	}
-}
-
-public void flick(DataPack pack)
-{
-	// Reset the pack to read from the start
-	pack.Reset();
-	
-	int client = pack.ReadCell();
-	int rocketId = pack.ReadCell();
-	
-	isFlicking[client] = true;
-	
-	setFlick(client, rocketId);
-	
-	CreateTimer(0.2, finishFlick, client);
-	
-	delete pack;
-}
-
-public Action finishFlick(Handle timer, int client)
-{
-	isFlicking[client] = false;
-	
-	return Plugin_Handled;
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
@@ -349,19 +376,18 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	
 	int currentWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	
+	updateNextAirblast(client, currentWeapon);
+	
 	if (isClientBot(client))
 	{
-		//ModRateOfFire(currentWeapon);
-		PrintToChatAll("client: %i", client);
 		controlClient(client, currentWeapon, buttons, vel);
 	}
 	else
 	{
 		//lookAtEntity(client, 1, 0.2);
-		controlClient(client, currentWeapon, buttons, vel);
+		//controlClient(client, currentWeapon, buttons, vel);
+		//PrintToChatAll("%.2f %.2f %.2f", vel[0], vel[1], vel[2]);
 	}
-	
-	updateNextAirblast(client, currentWeapon);
 	
 	return Plugin_Continue;
 }
@@ -377,49 +403,44 @@ void controlClient(int client, int currentWeapon, int &buttons, int vel[3])
 	int orbitRocketRefIds[MAX_ROCKETS];
 	
 	getPredictedTargets(client, numTargeting, rocketRefIds);
-	strategy(client, currentWeapon, rocketRefIds, airblastRocketRef, orbitRocketRefIds);
+	strategy(client, currentWeapon, rocketRefIds, airblastRocketRef, orbitRocketRefIds, numTargeting);
 	
 	if (numTargeting > 0)
 	{
+		if (orbitRocketRefIds[0] != ARRAY_END)
+			orbitRockets(client, vel, orbitRocketRefIds);
+		
 		if (airblastRocketRef != ARRAY_END)
 			airblastRocket(client, airblastRocketRef, buttons, currentWeapon);
-		
-		//if (orbitRocketRefIds[0] != ARRAY_END)
-		//	orbitRockets(client, vel, orbitRocketRefIds);
-		
-		lookAt(client, lookAtVector[client], lookSpeed[client]);
-		PrintToChatAll("control client: client: %i", client);
+	}
+	else
+	{
+		airblastRocketRef = ARRAY_END;
+		orbitRocketRefIds[0] = ARRAY_END;
 	}
 	
-	// Look at the lookAtVector
-	//lookAt(client, lookAtVector[client], lookSpeed[client]);
-	
-	/*if (!isFlicking[client])
+	if (orbitRocketRefIds[0] == ARRAY_END)
 	{
-		int c = getRandomClient(client);
-		
-		if (c != -1)
-			lookAtEntity(client, c, GetRandomFloat(0.05, 0.15));
-	}*/
+		clientOrbitDir[client] = noOrbit;
+	}
 	
-	//PrintToChatAll("l: %.2f, %.2f, %.2f", lookAtVector[client][0], lookAtVector[client][1], lookAtVector[client][2]);
+	if (clientOrbitDir[client] == noOrbit)
+	{
+		//PrintToChatAll("%.2f %.2f %.2f", clientOrbitPos[client][0], clientOrbitPos[client][1], clientOrbitPos[client][2]);
+		movePlayer(client, clientOrbitPos[client], vel);
+	}
 }
 
 /*
 * The strategy of the bots
 */
-void strategy(int client, int weapon, int rocketRefIds[MAX_ROCKETS], int &airblastRocketRef, int orbitRocketRefIds[MAX_ROCKETS])
+void strategy(int client, int weapon, int rocketRefIds[MAX_ROCKETS], int &airblastRocketRef, int orbitRocketRefIds[MAX_ROCKETS], int numTargeting)
 {
-	// The best direction to orbit in (the direction which has more rockets
-	OrbitDirection bestOrbitDirection;
-	// The number of clockwise and counter clockwise orbiting rockets
-	int clockwiseRockets;
-	int counterClockwiseRockets;
-	// The best rocket to airblast since it is the most deadly
-	float bestDeathRocketWeight = -100.0;
-	int bestDeathRocketRefId;
+	// The best orbit score. Lower the better
+	float bestOrbitScore = 100.0;
+	int bestOrbitRocketId;
 	
-	// Get all the details needed to calculate the weight
+	// Calculates the orbit score of each other
 	for (int i = 0; i < MAX_ROCKETS; i++)
 	{
 		if (rocketRefIds[i] == ARRAY_END)
@@ -427,115 +448,92 @@ void strategy(int client, int weapon, int rocketRefIds[MAX_ROCKETS], int &airbla
 			break;
 		}
 		
-		int rocketId = EntRefToEntIndex(rocketEntityRef[rocketRefIds[i]]);
-		
-		OrbitDirection od = directionToOrbit(client, rocketId);
-		
-		if (od == clockwiseOrbit)
-		{
-			clockwiseRockets++;
-		}
-		else
-		{
-			counterClockwiseRockets++;
-		}
-	}
-	
-	// Check which direction is best to orbit. The side with more rockets is better
-	if (clockwiseRockets > counterClockwiseRockets)
-	{
-		bestOrbitDirection = clockwiseOrbit;
-	}
-	else if (clockwiseRockets == counterClockwiseRockets)
-	{
-		bestOrbitDirection = noOrbit;
-	}
-	else
-	{
-		bestOrbitDirection = counterClockwiseOrbit;
-	}
-	
-	// Calculate the weights for the rockets
-	for (int i = 0; i < MAX_ROCKETS; i++)
-	{
-		if (rocketRefIds[i] == ARRAY_END)
-		{
-			break;
-		}
-		
-		// For all the variables in weight, add a small amount to prevent 0 weight
-		float minFloatWeight = 0.01;
-		
-		int rocketId = EntRefToEntIndex(rocketEntityRef[rocketRefIds[i]]);
-		
-		float cRocketSpeed = rocketSpeed[rocketRefIds[i]] + minFloatWeight;
-		float hitTime = predictRocketHitTime(client, rocketId) + minFloatWeight;
-		OrbitDirection od = directionToOrbit(client, rocketId);
+		float cRocketSpeed = rocketSpeed[rocketRefIds[i]];
 		float turnRate = rocketTurnRate[rocketRefIds[i]];
+		float score = 0.0;
 		
-		float deathRocketWeight;
-		float speedWeight;
-		float timeWeight;
-		float orbitWeight;
-		float turnRateWeight;
-		
-		speedWeight = 1.0 - (rocketClassSpeed[0] / cRocketSpeed);
-		timeWeight = 1.5 - hitTime;
-		orbitWeight = od == bestOrbitDirection ? 0.75 : 1.0;
-		turnRateWeight = turnRate;
-		
-		// The weight of the rocket, higher means more dangerous and therefore should airblast
-		deathRocketWeight = speedWeight * timeWeight * orbitWeight * turnRateWeight;
-		
-		if (deathRocketWeight > bestDeathRocketWeight || bestDeathRocketWeight == -100.0)
+		if (whichScore == 0)
 		{
-			bestDeathRocketWeight = deathRocketWeight;
-			bestDeathRocketRefId = rocketRefIds[i];
+			score = calculateOrbitScore(cRocketSpeed, turnRate);
+		}
+		else if (whichScore == 1)
+		{
+			score = calculateRandomScore();
+		}
+		
+		if (score < bestOrbitScore || bestOrbitScore == 100.0)
+		{
+			bestOrbitScore = score;
+			bestOrbitRocketId = i;
 		}
 	}
 	
-	// Only airblast if can airblast
-	if (canAirblast(client, weapon))
-	{
-		airblastRocketRef = bestDeathRocketRefId;
-	}
-	else
-	{
-		airblastRocketRef = ARRAY_END;
-	}
+	orbitRocketRefIds[0] = rocketRefIds[bestOrbitRocketId];
 	
-	int c = 0;
 	for (int i = 0; i < MAX_ROCKETS; i++)
 	{
 		if (rocketRefIds[i] == ARRAY_END)
 		{
-			orbitRocketRefIds[c] = ARRAY_END;
 			break;
 		}
 		
-		// Don't orbit if the bot is airblasting
-		if (rocketRefIds[i] == airblastRocketRef)
+		if (bestOrbitRocketId != i || numTargeting == 1)
 		{
-			// Do another check to see whether the bot should continue to orbit because the rocket is too close
-			float clientEyePos[3];
-			float rocketPos[3];
-			float clientToRocket[3];
-			int rocketId = EntRefToEntIndex(rocketEntityRef[airblastRocketRef]);
-			
-			GetClientEyePosition(client, clientEyePos);
-			GetEntPropVector(rocketId, Prop_Send, "m_vecOrigin", rocketPos);
-			
-			SubtractVectors(rocketPos, clientEyePos, clientToRocket);
-		
-			float dist = GetVectorLength(clientToRocket);
-			
-			// Don't try to orbit if far and it is the only rocket
-			if (dist > ORBIT_DIST && canAirblast(client, weapon))
-				continue;
+			airblastRocketRef = rocketRefIds[i];
+			break;
 		}
-		
-		orbitRocketRefIds[c] = rocketRefIds[i];
-		c++;
+	}
+}
+
+/*
+* Calculates the orbit score
+*/
+float calculateOrbitScore(float speed, float turnRate)
+{
+	float turnRateScore = normValue(turnRate, 0.175, 0.5);
+	float speedScore = normValue(speed, 2000.0, 6000.0);
+
+	// Turn rate plays a larger factor than speed does
+	float orbitScore = normValue(turnRateScore + ((speedScore + 0.01) * (turnRateScore + 0.01)), 0.0, 1.0);
+	
+	return orbitScore;
+}
+
+/*
+* Calculates a random score
+*/
+float calculateRandomScore()
+{
+	// Turn rate plays a larger factor than speed does
+	float randomScore = GetRandomFloat(0.0, 1.0);
+	
+	return randomScore;
+}
+
+/*
+* Moves client to a position
+*/
+void movePlayer(int client, float newPos[3], float vel[3])
+{
+	float clientPos[3];
+	float clientToPos[3];
+	float length;
+	
+	GetClientAbsOrigin(client, clientPos);
+	
+	SubtractVectors(newPos, clientPos, clientToPos);
+	length = GetVectorLength(clientToPos, false);
+	
+	//PrintToChatAll("%.2f %.2f %.2f", clientToPos[0], clientToPos[1], length);
+	
+	if (length >= 100.0)
+	{
+		//vel[0] = clientToPos[0] > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
+		//vel[1] = clientToPos[1] > 0.0 ? -PYRO_SPEED : PYRO_SPEED;
+		NormalizeVector(clientToPos, clientToPos);
+		//PrintToChatAll("%.2f %.2f %.2f", clientToPos[0], clientToPos[1], length);
+		vel[0] = clientToPos[0] * PYRO_SPEED;
+		vel[1] = clientToPos[1] * -PYRO_SPEED;
 	}
 }
 
@@ -564,7 +562,12 @@ void airblastRocket(int client, int rocketRefId, int &buttons, int weapon)
 		// Look at the rocket
 		//lookAt(client, rocketPos, 0.3);
 		
-		lookAtEntity(client, rocketId, 0.3);
+		//lookAtEntity(client, rocketRefId, 0.3);
+		
+		float angle[3];
+		angle[0] = 0.0 - RadToDeg(ArcTangent((rocketPos[2] - clientEyePos[2]) / (FloatAbs(SquareRoot(Pow(clientEyePos[0] - rocketPos[0], 2.0) + Pow(rocketPos[1] - clientEyePos[1], 2.0))))));
+		angle[1] = GetAngle(clientEyePos, rocketPos);
+		TeleportEntity(client, NULL_VECTOR, angle, NULL_VECTOR);
 	}
 	
 	// Checks where the client is looking at. If not looking where the rocket is, do not airblast
@@ -577,21 +580,10 @@ void airblastRocket(int client, int rocketRefId, int &buttons, int weapon)
 	angle = ArcCosine(GetVectorDotProduct(clientForward, clientToRocket)) * RAD_TO_DEG;
 	
 	// Airblast the rocket if certain conditions are met
-	if (rocketDist <= 200.0 && canAirblast(client, weapon))
+	if (rocketDist <= 200.0 && canAirblast(client, weapon) && angle <= 25.0)
 	{
 		buttons |= IN_ATTACK2;
-		
-		// Flicking
-		/*if (!isFlicking[client])
-		{
-			DataPack pack = new DataPack();
-			
-			pack.WriteCell(client);
-			pack.WriteCell(rocketId);
-			
-			RequestFrame(flick, pack);
-		}*/
-		
+		lookAtEntity(client, rocketId, 0.3);
 		// Set the next time the client can airblast
 		updateNextAirblast(client, weapon);
 	}
@@ -608,138 +600,65 @@ void orbitRockets(int client, float vel[3], int rocketRefIds[MAX_ROCKETS])
 	float clientEyeAngles[3];
 	float clientForward[3];
 	float rocketPos[3];
-	float finalCross[3];
-	float totalRocketDist;
-	float closestRocketId;
-	float closestRocketDist;
-	float a;
+	float rocketVel[3];
+	float clientToRocketCross[3];
+	float clientToRocket[3];
+	float clientToRocketDist;
 	
 	// Get client values
 	GetClientEyePosition(client, clientEyePos);
 	GetClientEyeAngles(client, clientEyeAngles);
 	GetAngleVectors(clientEyeAngles, clientForward, NULL_VECTOR, NULL_VECTOR);
 	
-	// Get some values needed for multiple rockets
-	for (int i = 0; i < MAX_ROCKETS; i++)
-	{
-		if (rocketRefIds[i] == ARRAY_END)
-		{
-			break;
-		}
-		
-		float clientToRocket[3];
-		int rocketId = EntRefToEntIndex(rocketEntityRef[rocketRefIds[i]]);
-		
-		if (rocketId == -1)
-			continue;
-		
-		// Get rocket values
-		GetEntPropVector(rocketId, Prop_Send, "m_vecOrigin", rocketPos);
-		
-		// Get the vector from the client to the rocket position
-		SubtractVectors(rocketPos, clientEyePos, clientToRocket);
-		
-		// Calculate the total rocket distance
-		totalRocketDist += GetVectorLength(clientToRocket);
-	}
+	int rocket = EntRefToEntIndex(rocketEntityRef[rocketRefIds[0]]);
 	
-	// Calculate the weight for all the rockets
-	for (int i = 0; i < MAX_ROCKETS; i++)
+	// Get rocket values
+	GetEntPropVector(rocket, Prop_Send, "m_vecOrigin", rocketPos);
+	GetEntPropVector(rocket, Prop_Data, "m_vecAbsVelocity", rocketVel);
+	
+	// Get the vector from the client to the rocket position
+	SubtractVectors(rocketPos, clientEyePos, clientToRocket);
+	clientToRocketDist = GetVectorLength(clientToRocket);
+	
+	// Only orbit the rocket if it is close
+	if (clientToRocketDist <= NORM_DIST)
 	{
-		if (rocketRefIds[i] == ARRAY_END)
-		{
-			break;
-		}
-		
-		float clientToRocket[3];
-		float clientToRocketCross[3];
-		int rocketId = EntRefToEntIndex(rocketEntityRef[rocketRefIds[i]]);
-		
-		if (rocketId == -1)
-			continue;
-		
-		// Get rocket values
-		GetEntPropVector(rocketId, Prop_Send, "m_vecOrigin", rocketPos);
-		
-		// Get the vector from the client to the rocket position
-		SubtractVectors(rocketPos, clientEyePos, clientToRocket);
-		
-		// Calculate the distance weight. The closer the rocket is, the higher the weight
-		float currentRocketDist = GetVectorLength(clientToRocket);
-		float distWeight = 1 - (currentRocketDist / totalRocketDist);
-		
-		// Calculate the direction of the rocket and scale by weight
+		//Orbit the rocket
+		// Calculate a vector perpendicular to the up and clientToRocket vector
+		// This vector tells us which direction to move in
 		GetVectorCrossProduct(up, clientToRocket, clientToRocketCross);
-		ScaleVector(clientToRocketCross, distWeight);
 		
-		NormalizeVector(clientToRocketCross, clientToRocketCross);
-		
-		AddVectors(clientToRocketCross, finalCross, finalCross);
-		
-		if (currentRocketDist < closestRocketDist || closestRocketDist == 0.0)
-		{
-			closestRocketDist = currentRocketDist;
-			closestRocketId = rocketId;
-		}
-	}
-	
-	// Orbit in the direction of the closest rocket
-	OrbitDirection od = directionToOrbit(client, closestRocketId);
-	
-	// Invert the vector if orbiting a different way
-	if (od == counterClockwiseOrbit)
-	{
-		ScaleVector(finalCross, -1.0);
-		a = add;
-	}
-	else
-		a = add * -1.0;
-	
-	if (clientOrbitDir[client] == noOrbit)
-	{
+		OrbitDirection od = directionToOrbit(client, rocket);
 		clientOrbitDir[client] = od;
+		
+		if (od == noOrbit)
+		{
+			float clientPos[3];
+			GetClientAbsOrigin(client, clientPos);
+			
+			setClientOrbitPos(client, clientPos);
+		}
+		
+		if (od == counterClockwiseOrbit)
+		{
+			ScaleVector(clientToRocketCross, -1.0);
+		}
+		
+		// Calculate the direction the client should be moving in
+		float angle = ArcCosine(GetVectorDotProduct(clientToRocketCross, clientForward) / GetVectorLength(clientToRocketCross));
+		float cross[3];
+		GetVectorCrossProduct(clientToRocketCross, clientForward, cross);
+		if (cross[2] < 0.0)
+		{
+			angle *= -1.0;
+		}
+		
+		// Move in a circular motion
+		//vel[0] = Cosine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
+		//vel[1] = Sine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
+		vel[0] = Cosine(angle) * PYRO_SPEED;
+		vel[1] = Sine(angle) * PYRO_SPEED;
 	}
-	
-	// Calculate the direction the client should be moving in
-	/*float angle = ArcCosine(GetVectorDotProduct(finalCross, clientForward) / GetVectorLength(finalCross));
-	float cross[3];
-	GetVectorCrossProduct(finalCross, clientForward, cross);
-	if (cross[2] < 0.0)
-	{
-		angle *= -1.0;
-	}
-	
-	// Move in a circular motion
-	vel[0] = Cosine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
-	vel[1] = Sine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;*/
-	
-	//AddVectors(origin, clientEyePos, origin);
-	float radius = 100.0;
-	float pos[3];
-	//pos[0] = Cosine(ang * DEG_TO_RAD) * radius;
-	//pos[1] = Sine(ang * DEG_TO_RAD) * radius;
-	ang += a;
-	if (ang >= 360.0)
-		ang = 0.0;
-	if (ang <= -360.0)
-		ang = 0.0;
-	
-	//ScaleVector(finalCross, 0.01);
-	NormalizeVector(pos, pos);
-	NormalizeVector(finalCross, finalCross);
-	AddVectors(pos, finalCross, pos);
-	
-	float angle = ArcCosine(GetVectorDotProduct(pos, clientForward) / GetVectorLength(pos));
-	float cross[3];
-	GetVectorCrossProduct(pos, clientForward, cross);
-	if (cross[2] < 0.0)
-	{
-		angle *= -1.0;
-	}
-	
-	// Move in a circular motion
-	vel[0] = Cosine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
-	vel[1] = Sine(angle) > 0.0 ? PYRO_SPEED : -PYRO_SPEED;
 }
 
 /*
@@ -750,10 +669,9 @@ OrbitDirection directionToOrbit(int client, int rocketId)
 {
 	float clientEyePos[3];
 	float rocketPos[3];
-	float newRocketPos[3];
 	float rocketVel[3];
 	float rocketToClient[3];
-	float rocketRight[3];
+	float rocketToClientRight[3];
 	float dot;
 	
 	GetEntPropVector(rocketId, Prop_Send, "m_vecOrigin", rocketPos);
@@ -763,17 +681,23 @@ OrbitDirection directionToOrbit(int client, int rocketId)
 	
 	// Get the vector between the client and the rocket
 	SubtractVectors(rocketPos, clientEyePos, rocketToClient);
-	// Get the new rocket position
-	ScaleVector(rocketVel, 10.0);
-	AddVectors(rocketPos, rocketVel, newRocketPos);
 	
 	// Get which side is right for the rocketToClient vector
-	GetVectorCrossProduct(rocketToClient, up, rocketRight);
-	
+	GetVectorCrossProduct(rocketToClient, up, rocketToClientRight);
+	NormalizeVector(rocketToClientRight, rocketToClientRight);
+	NormalizeVector(rocketVel, rocketVel);
 	// Determines whether the client should orbit clockwise
-	dot = GetVectorDotProduct(rocketRight, newRocketPos);
-	
+	dot = GetVectorDotProduct(rocketToClientRight, rocketVel);
 	return dot >= 0.0 ? clockwiseOrbit : counterClockwiseOrbit;
+}
+
+/*
+* Sets the clients orbit position
+*/
+void setClientOrbitPos(int client, float clientPos[3])
+{
+	ScaleVector(clientOrbitPos[client], 0.0);
+	AddVectors(clientOrbitPos[client], clientPos, clientOrbitPos[client]);
 }
 
 /*
@@ -831,93 +755,6 @@ void determineRocketPos(int client, int rocketId, float result[2])
 }
 
 /*
-* Sets a random flick vector for the client
-*/
-void setFlick(int client, int rocketId)
-{
-	float clientEyePos[3];
-	float clientEyeAngles[3];
-	float clientForward[3];
-	float angleX, angleZ;
-	float vectorX[3], vectorZ[3];
-	float whereIsRocket[2];
-	
-	GetClientEyeAngles(client, clientEyeAngles);
-	GetAngleVectors(clientEyeAngles, clientForward, NULL_VECTOR, NULL_VECTOR);
-	GetClientEyePosition(client, clientEyePos);
-	
-	// Gets the angle of the playres forward with the up vector
-	// Used to not flick past this angle when flicking up or down
-	NormalizeVector(clientForward, clientForward);
-	float ForwardUpAngle = ArcCosine(GetVectorDotProduct(clientForward, up)) * RAD_TO_DEG;
-	
-	// Determines where the rocket is. Whether it is above the client, to the left etc.
-	determineRocketPos(client, rocketId, whereIsRocket);
-	
-	float negative = GetRandomInt(0, 1);
-	
-	/*angleX = GetRandomFloat(60.0, 120.0) * DEG_TO_RAD;
-	angleZ = GetRandomFloat(60.0, 120.0) * DEG_TO_RAD;
-	
-	angleX = negative ? angleX * -1.0 : angleX;
-	angleZ = negative ? angleZ * -1.0 : angleX;*/
-	angleX = 90.0 * DEG_TO_RAD;
-	
-	/*if (whereIsRocket[1] > 25.0 && GetRandomFloat(0.0, 100.0) >= 100.0)
-	{
-		// The rocket is above the player
-		angleX = GetRandomFloat(45.0, 120.0) * DEG_TO_RAD;
-	}
-	else if (whereIsRocket[1] < 25.0 && GetRandomFloat(0.0, 100.0) >= 100.0)
-	{
-		// The rocket is below the player
-		angleX = GetRandomFloat(-45.0, -120.0) * DEG_TO_RAD;
-	}
-	
-	if (whereIsRocket[0] > 0.0 && GetRandomFloat(0.0, 100.0) <= 50.0)
-	{
-		// The rocket is to the right of the player
-		angleZ = GetRandomFloat(60.0, 160.0) * DEG_TO_RAD;
-	}
-	else if (whereIsRocket[0] < 0.0 && GetRandomFloat(0.0, 100.0) <= 50.0)
-	{
-		// The rocket is to the left of the player
-		angleZ = GetRandomFloat(-60.0, -160.0) * DEG_TO_RAD;
-	}*/
-	
-	//angleX = (ForwardUpAngle - 5.0) * DEG_TO_RAD;
-	
-	//angleX = GetRandomInt(0, 1) == 0 ? -angleX : angleX;
-	//angleZ = GetRandomInt(0, 1) == 0 ? -angleZ : angleZ;
-	
-	// Rotation around z-axis (Left (+ve) and Right (-ve) flicks)
-	/*vectorZ[0] = Cosine(angleZ) * clientForward[0] - Sine(angleZ) * clientForward[1];
-	vectorZ[1] = Sine(angleZ) * clientForward[0] + Cosine(angleZ) * clientForward[1];
-	vectorZ[2] = clientForward[2];*/
-	
-	// Rotation around x-axis (Up (-ve) and Down (+ve) flicks)
-	vectorX[0] = clientForward[0];
-	vectorX[1] = Cosine(angleX) * clientForward[1] - Sine(angleX) * clientForward[2];
-	vectorX[2] = Sine(angleX) * clientForward[1] + Cosine(angleX) * clientForward[2];
-	
-	AddVectors(vectorZ, vectorX, flickVector[client]);
-	
-	/*PrintToChatAll("r: %.4f, %.4f, %.4f", clientForward[0], clientForward[1], clientForward[2]);
-	PrintToChatAll("f: %.4f, %.4f, %.4f", flickVector[client][0], flickVector[client][1], flickVector[client][2]);
-	
-	NormalizeVector(clientForward, clientForward);
-	NormalizeVector(flickVector[client], flickVector[client]);
-	float dot = GetVectorDotProduct(clientForward, flickVector[client]);
-	float angle = ArcCosine(dot) * RAD_TO_DEG;
-	
-	PrintToChatAll("Dot product: %.2f, Angle: %.2f", dot, angle);*/
-	
-	float speed = 0.2;//GetRandomFloat(0.2, 0.8);
-	
-	updateLookAtVector(client, flickVector[client], speed);
-}
-
-/*
 * Updates the look at vector
 */
 void updateLookAtVector(int client, float vec[3], float speed)
@@ -925,6 +762,7 @@ void updateLookAtVector(int client, float vec[3], float speed)
 	lookAtVector[client][0] = vec[0];
 	lookAtVector[client][1] = vec[1];
 	lookAtVector[client][2] = vec[2];
+	
 	lookSpeed[client] = speed;
 }
 
@@ -1079,6 +917,8 @@ void getPredictedTargets(int client, int &numTargeting, int rocketRefs[MAX_ROCKE
 	// Goes through all the valid rockets
 	while ((index = findNextValidRocket(index)) != -1)
 	{
+		
+		// If it is the predicted target
 		if (predictedTargets[index] == client)
 		{
 			rocketRefs[i++] = index;
@@ -1197,6 +1037,20 @@ bool isValidRocket(int rocketIndex)
 	}
 	
 	return false;
+}
+
+/*
+* Finds a rocket index from it's entity.
+*/
+int findRocketByEntity(entity)
+{
+	int index = -1;
+	
+	while ((index = findNextValidRocket(index)) != -1)
+		if (EntRefToEntIndex(rocketEntityRef[index]) == entity)
+			return index;
+		
+	return -1;
 }
 
 /*
@@ -1352,15 +1206,25 @@ stock int getRandomClient(int client)
 	
 	for (int i = 1; i < numClients + 1; i++)
 	{
-		int opponentTeam = GetClientTeam(i);
+		int team = GetClientTeam(i);
 		
-		if (IsClientInGame(i) && i != client && !opponentTeam != TFTeam_Spectator && clientTeam != opponentTeam)
+		if (IsClientInGame(i) && i != client && opponentTeam != TFTeam_Spectator && clientTeam != team)
 		{
 			clients[clientCount++] = i;
 		}
 	}
 	
 	return (clientCount == 0) ? -1 : clients[GetRandomInt(0, clientCount - 1)]; 
+}
+
+/*
+* Gets the number of players on the clients team
+*/
+stock int getClientTeamCount(int client)
+{
+	int clientTeam = GetClientTeam(client);
+	
+	return GetTeamClientCount(clientTeam);
 }
 
 /*
@@ -1380,6 +1244,18 @@ stock bool canAirblast(int client, int weapon)
 	return t <= 0.0;
 }
 
+stock ChangePlayerTeam()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && !IsFakeClient(i) && !IsClientObserver(i) && GetClientTeam(i) != 2 && botEnabled)
+		{
+			ChangeClientTeam(i, 2);
+			TF2_RespawnPlayer(i);
+		}
+	}
+}
+
 /*`
 * Calculate the linear interpolation between two vectors. Stores result in third vector
 */
@@ -1392,6 +1268,25 @@ stock void lerp(float a[3], float b[3], float c[3], float t)
 	c[0] = a[0] + (b[0] - a[0]) * t;
 	c[1] = a[1] + (b[1] - a[1]) * t;
 	c[2] = a[2] + (b[2] - a[2]) * t;
+}
+
+/*
+* Normalizes a value between a min and max value
+*/
+stock float normValue(float value, float min, float max)
+{
+	return (value - min) / (max - min);
+}
+
+stock Float:GetAngle(const Float:coords1[3], const Float:coords2[3])
+{
+	new Float:angle = RadToDeg(ArcTangent((coords2[1] - coords1[1]) / (coords2[0] - coords1[0])));
+	if (coords2[0] < coords1[0])
+	{
+		if (angle > 0.0) angle -= 180.0;
+		else angle += 180.0;
+	}
+	return angle;
 }
 
 stock ModRateOfFire(weapon)
