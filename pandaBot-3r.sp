@@ -426,10 +426,10 @@ void controlClient(int client, int currentWeapon, int &buttons, int vel[3])
 	if (numTargeting > 0)
 	{
 		if (orbitRocketRefIds[0] != ARRAY_END)
-			orbitRockets(client, vel, orbitRocketRefIds);
+			orbitRockets2(client, vel, orbitRocketRefIds);
 		
-		if (airblastRocketRef != ARRAY_END)
-			airblastRocket(client, airblastRocketRef, buttons, currentWeapon);
+		//if (airblastRocketRef != ARRAY_END)
+		//	airblastRocket(client, airblastRocketRef, buttons, currentWeapon);
 	}
 	else
 	{
