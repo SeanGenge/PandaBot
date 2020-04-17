@@ -54,6 +54,19 @@ enum OrbitDirection
 }
 
 // *********************************************************************************
+// CVARS
+// *********************************************************************************
+Handle cvarEnable;
+Handle cvarBotName;
+Handle cvarVoteMode;
+Handle cvarVoteTime;
+Handle cvarVoteTimeDelay;
+Handle cvarVotePercentage;
+Handle cvarMinPlayers;
+Handle cvarMaxPlayers;
+
+
+// *********************************************************************************
 // VARIABLES
 // *********************************************************************************
 
@@ -66,7 +79,11 @@ int numVotes = 0;
 int numVotesNeeded = 0;
 bool voted[MAXPLAYERS + 1] = {false, ...};
 bool canVote;
-float votePercentage = 0.5;
+// Keeps track of when the bot has been voted on or off
+// 0 - no vote 1 - Voted for bot 2 - Voted to disable bot
+int hasVoted;
+
+char botName[PLATFORM_MAX_PATH];
 
 int whichScore;
 
@@ -156,8 +173,22 @@ public OnPluginStart()
 	HookEvent("arena_win_panel", OnRoundEnd, EventHookMode_PostNoCopy);
 	HookEvent("player_death", OnPlayerDeath, EventHookMode_Post);
 	
+	//Convar
+	CreateConVar("sm_pandabot_version", PLUGIN_VERSION, "Pandabot Version", FCVAR_PLUGIN|FCVAR_SPONLY|FCVAR_UNLOGGED|FCVAR_DONTRECORD|FCVAR_REPLICATED|FCVAR_NOTIFY);
+	cvarEnable = CreateConVar("sm_pandabot_enable", "1", "Enable the plugin? 1 = Yes, 0 = No.", 0, true, 0.0, true, 1.0);
+	cvarBotName = CreateConVar("sm_pandabot_name", "Panda Bot", "The name of the bot", 0);
+	cvarVoteTime = CreateConVar("sm_pandabot_vote_time", "25.0", "Time in seconds the vote menu should last.", 0);
+	cvarVoteTimeDelay = CreateConVar("sm_pandabot_vote_delay", "60.0", "Time in seconds before players can initiate another PvB vote.", 0);
+	cvarVotePercentage = CreateConVar("sm_pandabot_vote_percentage", "0.60", "How many players are required for the vote to pass? 0.60 = 60%.", 0, true, 0.05, true, 1.0);
+	cvarMinPlayers = CreateConVar("sm_pandabot_minplayers", "1", "When there are a minimum of X amount of players or less, enable Pandabot. 0 = No Enable, 1 = Enables at 1 player... 5 = Enables at 5 players", 0);
+	cvarMaxPlayers = CreateConVar("sm_pandabot_maxplayers", "2", "When there are a maximum of X amount of players or more, Pandabot will disable. 0 = No disable, 2 = Disables at 2 players... 5 = Disables at 5 players.", 0);
+	
+	AutoExecConfig(true, "PandaBot");
+	
 	RegAdminCmd("sm_pbot", bot_Cmd, ADMFLAG_RCON, "Force enable/disable PvB.");
-	//RegConsoleCmd("sm_votepvb", votePvB_Cmd, "Vote to enable/disable PvB");
+	RegConsoleCmd("sm_votepvb", votePvB_Cmd, "Vote to enable/disable PvB");
+	
+	GetConVarString(cvarBotName, botName, sizeof(botName));
 }
 
 public OnConfigsExecuted()
@@ -165,41 +196,179 @@ public OnConfigsExecuted()
 	parseDodgeballConfiguration();
 }
 
-public OnClientConnected(client)
+public OnClientConnected(int client)
 {
 	if (IsFakeClient(client)) return;
 	
 	
+	voted[client] = false;
+	numVoters++;
+	numVotesNeeded = RoundToFloor(float(numVoters) * GetConVarFloat(cvarVotePercentage));
 }
 
-public OnClientDisconnect(client)
+public OnClientDisconnect(int client)
 {
 	if (IsFakeClient(client)) return;
 	
-	
+	if (voted[client]) numVotes--;
+	numVoters--;
+	numVotesNeeded = RoundToFloor(float(numVoters) * GetConVarFloat(cvarVotePercentage));
 }
 
-/*public Action:votePvB_Cmd(client, args)
+public Action votePvB_Cmd(int client, args)
 {
-	if (!GetConVarBool(cvarEnable) || GetConVarInt(cvarVoteMode) == 0) return Plugin_Handled;
+	if (!GetConVarBool(cvarEnable)) return Plugin_Handled;
 	
-	if (GetConVarInt(cvarVoteMode) != 2) AttemptPvBVotes(client);
+	attemptPvBVotes(client);
+	
+	return Plugin_Handled;
+}
+
+void attemptPvBVotes(int client)
+{
+	if (!GetConVarBool(cvarEnable)) return;
+	
+	if (!canVote)
+	{
+		ReplyToCommand(client, "\x01[\x03%s\x01]\x04 Sorry, voting for Player vs Bot is currently on cool-down.", botName);
+		return;
+	}
+	
+	if (voted[client])
+	{
+		ReplyToCommand(client, "\x01[\x03%s\x01]\x04 You have already voted.", botName);
+		return;
+	}
+	
+	char name[MAX_NAME_LENGTH];
+	GetClientName(client, name, sizeof(name));
+	
+	numVotes++;
+	voted[client] = true;
+	
+	if (!botEnabled)
+	{
+		PrintToChatAll("\x01[\x03%s\x01]\x04 %s wants to enable Player vs Bot. (%d votes, %d required)", botName, name, numVotes, numVotesNeeded);
+	}
 	else
 	{
-		PvBVoteMenu();
+		PrintToChatAll("\x01[\x03%s\x01]\x04 %s wants to disable Player vs Bot. (%d votes, %d required)", botName, name, numVotes, numVotesNeeded);
 	}
-	return Plugin_Handled;
-}*/
-
-public void OnMapStart()
-{
-	CreateTimer(5.0, timer_mapStart);
-	EnableBot();
+	
+	if (numVotes >= numVotesNeeded)
+	{
+		StartPvBVotes();
+	}
 }
 
-public void OnMapEnd()
+StartPvBVotes()
+{
+	PvBVoteMenu();
+	
+	resetPvBVotes();
+	canVote = false;
+	
+	CreateTimer(GetConVarFloat(cvarVoteTimeDelay), Timer_Delay, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action:Timer_Delay(Handle timer)
+{
+	canVote = true;
+}
+
+public OnMapStart()
+{
+	CreateTimer(5.0, timer_mapStart);
+	hasVoted = 0;
+	resetPvBVotes();
+}
+
+public Action timer_mapStart(Handle timer)
+{
+	mapChanged = false;
+}
+
+public OnMapEnd()
 {
 	mapChanged = true;
+}
+
+
+PvBVoteMenu()
+{
+	if (IsVoteInProgress()) return;
+	
+	Handle vm = CreateMenu(PvBVoteMenuHandler, MenuAction:MENU_ACTIONS_ALL);
+	SetVoteResultCallback(vm, Handle_VoteResults);
+	
+	if (!botEnabled)
+	{
+		SetMenuTitle(vm, "Enable Player vs Bot?");
+		AddMenuItem(vm, "yes", "Yes");
+		AddMenuItem(vm, "no", "No");
+	}
+	else
+	{
+		SetMenuTitle(vm, "Disable Player vs Bot?");
+		AddMenuItem(vm, "yes", "Yes");
+		AddMenuItem(vm, "no", "No");
+	}
+	
+	SetMenuExitButton(vm, false);
+	VoteMenuToAll(vm, GetConVarInt(cvarVoteTime));
+}
+
+public Handle_VoteResults(Handle menu, int num_votes, int num_clients, const client_info[][2], int num_items, const item_info[][2])
+{
+	int winner = 0;
+	
+	if (num_items > 1 && (item_info[0][VOTEINFO_ITEM_VOTES] == item_info[1][VOTEINFO_ITEM_VOTES]))
+	{
+		winner = GetRandomInt(0, 1);
+	}
+	
+	char winInfo[32];
+	GetMenuItem(menu, item_info[winner][VOTEINFO_ITEM_INDEX], winInfo, sizeof(winInfo));
+	
+	if (!botEnabled)
+	{
+		if (StrEqual(winInfo, "yes"))
+		{
+			PrintToChatAll("\x01[\x03%s\x01]\x04 Majority voted \"Yes\", enabling Player vs Bot...", botName);
+			EnableBot();
+		}
+		else
+		{
+			PrintToChatAll("\x01[\x03%s\x01]\x04 Majority voted \"No\", aborted operation.", botName);
+		}
+	}
+	else
+	{
+		if (StrEqual(winInfo, "yes"))
+		{
+			PrintToChatAll("\x01[\x03%s\x01]\x04 Majority voted \"Yes\", disabling Player vs Bot...", botName);
+			DisableBot();
+			ServerCommand("mp_scrambleteams");
+		}
+		else
+		{
+			PrintToChatAll("\x01[\x03%s\x01]\x04 Majority voted \"No\", aborted operation.", botName);
+		}
+	}
+}
+
+public PvBVoteMenuHandler(Handle:menu, MenuAction:action, client, param2)
+{
+	if (action == MenuAction_End) CloseHandle(menu);
+}
+
+
+void resetPvBVotes()
+{
+	numVotes = 0;
+	for (int i = 1; i <= MAXPLAYERS; i++) voted[i] = false;
+	
+	canVote = true;
 }
 
 public void OnPlayerDeath(Event event, const char[] name, bool dontBroadcast) 
@@ -237,14 +406,20 @@ public void OnRoundEnd(Event event, const char[] name, bool dontBroadcast)
 	
 }
 
-public Action timer_mapStart(Handle timer)
-{
-	mapChanged = false;
-}
-
 public OnGameFrame()
 {
-	ChangePlayerTeam();
+	if (!GetConVarBool(cvarEnable)) return;
+	
+	changePlayerTeam();
+	resetBotInfo();
+	
+	int onlineClients = getRealClientCount(false);
+	
+	if (getFakeClientCount(false) > 1)
+	{
+		DisableBot();
+		hasVoted = 0;
+	}
 	
 	int index = -1;
 	
@@ -271,8 +446,29 @@ public OnGameFrame()
 		}
 	}
 	
-	// Disable the bot
-	//if (mapChanged && botEnabled) DisableBot();
+	// Disable the bot when map changed
+	if (mapChanged && botEnabled)
+	{
+		DisableBot();
+		hasVoted = 0;
+	}
+	
+	int min = GetConVarInt(cvarMinPlayers);
+	int max = GetConVarInt(cvarMaxPlayers);
+	
+	// Handle min players cvar
+	if (min != 0 && onlineClients != 0 && onlineClients <= min && !botEnabled && !mapChanged && hasVoted != 2)
+	{
+		PrintToChatAll("\x01[\x03%s\x01]\x04 There is a minimum of %d players, enabling Player vs. Bot...", botName, onlineClients);
+		EnableBot();
+	}
+	
+	// Handle max players cvar
+	if (max != 0 && onlineClients != 0 && onlineClients >= max && botEnabled && !mapChanged && hasVoted != 1)
+	{
+		PrintToChatAll("\x01[\x03%s\x01]\x04 There is a maximum of %d players, disabling Player vs. Bot...", botName, onlineClients);
+		DisableBot();
+	}
 }
 
 public void OnEntitySpawned(int entity)
@@ -318,7 +514,6 @@ public Action:bot_Cmd(client, args)
 	else 
 	{
 		DisableBot();
-		ServerCommand("mp_scrambleteams");
 	}
 	return Plugin_Handled;
 }
@@ -327,24 +522,26 @@ EnableBot()
 {
 	ServerCommand("tf_bot_quota 0");
 	ServerCommand("mp_autoteambalance 0");
-	ServerCommand("tf_bot_add 1 Pyro blue easy \"%s\"", "Panda Bot");
+	ServerCommand("tf_bot_add 1 Pyro blue easy \"%s\"", botName);
 	//ServerCommand("tf_bot_add 1 Pyro red easy \"%s\"", "Second Bot");
 	//ServerCommand("tf_bot_add 1 Pyro blue easy \"%s\"", "Third Bot");
 	ServerCommand("tf_bot_keep_class_after_death 1");
 	ServerCommand("tf_bot_taunt_victim_chance 0");
 	ServerCommand("tf_bot_join_after_player 0");
 	
-	PrintToChatAll("\x01[\x03%s\x01]\x04 PvB Enabled.", PLUGIN_NAME);
+	PrintToChatAll("\x01[\x03%s\x01]\x04 PvB Enabled.", botName);
 	botEnabled = true;
+	hasVoted = 1;
 }
 
 DisableBot()
 {
 	ServerCommand("tf_bot_kick all");
 	ServerCommand("tf_bot_quota 0");
-	
-	PrintToChatAll("\x01[\x03%s\x01]\x04 PvB Disabled.", PLUGIN_NAME);
+	ServerCommand("mp_scrambleteams");
+	PrintToChatAll("\x01[\x03%s\x01]\x04 PvB Disabled.", botName);
 	botEnabled = false;
+	hasVoted = 2;
 }
 
 // *********************************************************************************
@@ -374,7 +571,7 @@ void initBots()
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
-	if (!IsClientInGame(client) || !IsPlayerAlive(client) || !isValidClient(client))
+	if (!GetConVarBool(cvarEnable) || !IsClientInGame(client) || !IsPlayerAlive(client) || !isValidClient(client))
 	{
 		return Plugin_Continue;
 	}
@@ -584,7 +781,7 @@ void airblastRocket(int client, int rocketRefId, int &buttons, int weapon)
 		
 		float angle[3];
 		angle[0] = 0.0 - RadToDeg(ArcTangent((rocketPos[2] - clientEyePos[2]) / (FloatAbs(SquareRoot(Pow(clientEyePos[0] - rocketPos[0], 2.0) + Pow(rocketPos[1] - clientEyePos[1], 2.0))))));
-		angle[1] = GetAngle(clientEyePos, rocketPos);
+		angle[1] = getAngle(clientEyePos, rocketPos);
 		TeleportEntity(client, NULL_VECTOR, angle, NULL_VECTOR);
 	}
 	
@@ -1325,6 +1522,32 @@ stock int getClientTeamCount(int client)
 	return GetTeamClientCount(clientTeam);
 }
 
+stock getRealClientCount( bool inGameOnly = true ) 
+{
+	int clients = 0;
+	for (int i = 1; i <= MaxClients; i++) 
+	{
+		if (((inGameOnly) ? IsClientInGame(i) : IsClientConnected(i)) && !IsFakeClient(i) && !IsClientReplay(i) && !IsClientSourceTV(i)) 
+		{
+			clients++;
+		}
+	}
+	return clients;
+}
+
+stock getFakeClientCount(bool inGameOnly = true)
+{
+	int clients = 0;
+	for (int i = 1; i <= MaxClients; i++) 
+	{
+		if (((inGameOnly) ? IsClientInGame(i) : IsClientConnected(i)) && IsFakeClient(i) && !IsClientReplay(i) && !IsClientSourceTV(i)) 
+		{
+			clients++;
+		}
+	}
+	return clients;
+}
+
 /*
 * Sets the next time the client can airblast
 */
@@ -1342,7 +1565,26 @@ stock bool canAirblast(int client, int weapon)
 	return t <= 0.0;
 }
 
-stock ChangePlayerTeam()
+stock resetBotInfo()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (isClientBot(i))
+		{
+			// Change bot's name.
+			SetClientInfo(i, "name", botName);
+			
+			// Change bot's team
+			if (GetClientTeam(i) != 3)
+			{
+				ChangeClientTeam(i, 3);
+				TF2_RespawnPlayer(i);
+			}
+		}
+	}
+}
+
+stock changePlayerTeam()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -1376,9 +1618,9 @@ stock float normValue(float value, float min, float max)
 	return (value - min) / (max - min);
 }
 
-stock Float:GetAngle(const Float:coords1[3], const Float:coords2[3])
+stock float getAngle(const float coords1[3], const float coords2[3])
 {
-	new Float:angle = RadToDeg(ArcTangent((coords2[1] - coords1[1]) / (coords2[0] - coords1[0])));
+	float angle = RadToDeg(ArcTangent((coords2[1] - coords1[1]) / (coords2[0] - coords1[0])));
 	if (coords2[0] < coords1[0])
 	{
 		if (angle > 0.0) angle -= 180.0;
@@ -1387,15 +1629,15 @@ stock Float:GetAngle(const Float:coords1[3], const Float:coords2[3])
 	return angle;
 }
 
-stock ModRateOfFire(weapon)
+stock modRateOfFire(weapon)
 {
-	new Float:m_flNextPrimaryAttack = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
-	new Float:m_flNextSecondaryAttack = GetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack");
+	float m_flNextPrimaryAttack = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+	float m_flNextSecondaryAttack = GetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack");
 	SetEntPropFloat(weapon, Prop_Send, "m_flPlaybackRate", 10.0);
 
-	new Float:fGameTime = GetGameTime();
-	new Float:fPrimaryTime = ((m_flNextPrimaryAttack - fGameTime) - 0.99);
-	new Float:fSecondaryTime = ((m_flNextSecondaryAttack - fGameTime) - 0.99);
+	float fGameTime = GetGameTime();
+	float fPrimaryTime = ((m_flNextPrimaryAttack - fGameTime) - 0.99);
+	float fSecondaryTime = ((m_flNextSecondaryAttack - fGameTime) - 0.99);
 
 	SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", fPrimaryTime + fGameTime);
 	SetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack", fSecondaryTime + fGameTime);

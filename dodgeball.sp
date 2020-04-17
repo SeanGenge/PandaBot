@@ -1661,7 +1661,7 @@ stock CopyVectors(Float:fFrom[3], Float:fTo[3])
 stock LerpVectors(Float:fA[3], Float:fB[3], Float:fC[3], Float:t)
 {
 	if (t < 0.0) t = 0.0;
-	if (t > 0.36) t = 0.368;
+	if (t > 0.36) t = 0.37;
 	
 	fC[0] = fA[0] + (fB[0] - fA[0]) * t;
 	fC[1] = fA[1] + (fB[1] - fA[1]) * t;
