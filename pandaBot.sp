@@ -87,9 +87,6 @@ char botName[PLATFORM_MAX_PATH];
 
 int whichScore;
 
-// The next time the client can airblast
-float nextAirblastTime[MAXPLAYERS + 1];
-
 // The direction each client is orbiting
 OrbitDirection clientOrbitDir[MAXPLAYERS + 1];
 // The clients position before orbiting
@@ -578,11 +575,6 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	
 	int currentWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	
-	if (currentWeapon != -1)
-	{
-		updateNextAirblast(client, currentWeapon);
-	}
-	
 	if (isClientBot(client))
 	{
 		controlClient(client, currentWeapon, buttons, vel);
@@ -799,8 +791,6 @@ void airblastRocket(int client, int rocketRefId, int &buttons, int weapon)
 	{
 		buttons |= IN_ATTACK2;
 		lookAtEntity(client, rocketId, 0.3);
-		// Set the next time the client can airblast
-		updateNextAirblast(client, weapon);
 	}
 }
 
@@ -1548,23 +1538,6 @@ stock getFakeClientCount(bool inGameOnly = true)
 	return clients;
 }
 
-/*
-* Sets the next time the client can airblast
-*/
-stock void updateNextAirblast(int client, int weapon)
-{
-	nextAirblastTime[client] = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
-}
-
-/*
-* Returns true if the client can airblast
-*/
-stock bool canAirblast(int client, int weapon)
-{
-	float t = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack") - nextAirblastTime[client];
-	return t <= 0.0;
-}
-
 stock resetBotInfo()
 {
 	for (int i = 1; i <= MaxClients; i++)
@@ -1627,6 +1600,14 @@ stock float getAngle(const float coords1[3], const float coords2[3])
 		else angle += 180.0;
 	}
 	return angle;
+}
+
+/*
+* Returns true if the client can airblast
+*/
+stock bool canAirblast(int client, int weapon)
+{
+	return ( GetGameTime() - GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack") ) > 0.0;
 }
 
 stock modRateOfFire(weapon)
